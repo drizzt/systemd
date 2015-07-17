@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <sys/statvfs.h>
+#include <sys/utsname.h>
 
 #include "macro.h"
 #include "util.h"
@@ -512,12 +513,22 @@ static int fd_fdinfo_mnt_id(int fd, const char *filename, int flags, int *mnt_id
 int fd_is_mount_point(int fd, const char *filename, int flags) {
         union file_handle_union h = FILE_HANDLE_INIT, h_parent = FILE_HANDLE_INIT;
         int mount_id = -1, mount_id_parent = -1;
-        bool nosupp = false, check_st_dev = true;
+        bool nosupp = false, check_st_dev = true, is_old_openvz = false;
         struct stat a, b;
+        struct utsname u;
         int r;
 
         assert(fd >= 0);
         assert(filename);
+
+        if (uname(&u) < 0)
+                return -errno;
+
+        if (!strncmp(u.release, "2.6.32-042stab", 14) &&
+            strcmp(u.release, "2.6.32-042stab111.1") < 0) {
+                is_old_openvz = true;
+                goto fallback_fstat;
+        }
 
         /* First we will try the name_to_handle_at() syscall, which
          * tells us the mount id and an opaque file "handle". It is
@@ -625,8 +636,13 @@ fallback_fstat:
         if (fstatat(fd, filename, &a, flags) < 0)
                 return -errno;
 
-        if (fstatat(fd, "", &b, AT_EMPTY_PATH) < 0)
-                return -errno;
+        if (is_old_openvz) {
+                if (fstatat(fd, ".", &b, 0) < 0)
+                        return -errno;
+        } else {
+                if (fstatat(fd, "", &b, AT_EMPTY_PATH) < 0)
+                        return -errno;
+        }
 
         /* A directory with same device and inode as its parent? Must
          * be the root directory */
